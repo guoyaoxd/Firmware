@@ -39,14 +39,18 @@
 
 #pragma once
 
+#include <px4_defines.h>
 #include <assert.h>
 #include <time.h>
 #include <stdlib.h>
 #include <math.h>
 #include <mathlib/math/test/test.hpp>
+#include <mathlib/math/filter/LowPassFilter2p.hpp>
 
 #include "block/Block.hpp"
 #include "block/BlockParam.hpp"
+
+#include "matrix/math.hpp"
 
 namespace control
 {
@@ -114,7 +118,7 @@ public:
 // methods
 	BlockLowPass(SuperBlock *parent, const char *name) :
 		Block(parent, name),
-		_state(0.0f/0.0f /* initialize to invalid val, force into is_finite() check on first call */),
+		_state(0.0f / 0.0f /* initialize to invalid val, force into is_finite() check on first call */),
 		_fCut(this, "") // only one parameter, no need to name
 	{};
 	virtual ~BlockLowPass() {};
@@ -161,6 +165,36 @@ protected:
 };
 
 int __EXPORT blockHighPassTest();
+
+/**
+ * A 2nd order low pass filter block which uses the default px4 2nd order low pass filter
+ */
+class __EXPORT BlockLowPass2 : public Block
+{
+public:
+// methods
+	BlockLowPass2(SuperBlock *parent, const char *name, float sample_freq) :
+		Block(parent, name),
+		_state(0.0 / 0.0 /* initialize to invalid val, force into is_finite() check on first call */),
+		_fCut(this, ""), // only one parameter, no need to name
+		_fs(sample_freq),
+		_lp(_fs, _fCut.get())
+	{};
+	virtual ~BlockLowPass2() {};
+	float update(float input);
+// accessors
+	float getState() { return _state; }
+	float getFCutParam() { return _fCut.get(); }
+	void setState(float state) { _state = _lp.reset(state); }
+protected:
+// attributes
+	float _state;
+	control::BlockParamFloat _fCut;
+	float _fs;
+	math::LowPassFilter2p _lp;
+};
+
+int __EXPORT blockLowPass2Test();
 
 /**
  * A rectangular integrator.
@@ -262,6 +296,7 @@ public:
 	void setU(float u) {_u = u;}
 	float getU() {return _u;}
 	float getLP() {return _lowPass.getFCut();}
+	float getO() { return _lowPass.getState(); }
 protected:
 // attributes
 	float _u; /**< previous input */
@@ -284,7 +319,8 @@ public:
 		_kP(this, "") // only one param, no need to name
 	{};
 	virtual ~BlockP() {};
-	float update(float input) {
+	float update(float input)
+	{
 		return getKP() * input;
 	}
 // accessors
@@ -310,7 +346,8 @@ public:
 		_kI(this, "I")
 	{};
 	virtual ~BlockPI() {};
-	float update(float input) {
+	float update(float input)
+	{
 		return getKP() * input +
 		       getKI() * getIntegral().update(input);
 	}
@@ -341,7 +378,8 @@ public:
 		_kD(this, "D")
 	{};
 	virtual ~BlockPD() {};
-	float update(float input) {
+	float update(float input)
+	{
 		return getKP() * input +
 		       getKD() * getDerivative().update(input);
 	}
@@ -374,7 +412,8 @@ public:
 		_kD(this, "D")
 	{};
 	virtual ~BlockPID() {};
-	float update(float input) {
+	float update(float input)
+	{
 		return getKP() * input +
 		       getKI() * getIntegral().update(input) +
 		       getKD() * getDerivative().update(input);
@@ -407,11 +446,13 @@ public:
 		SuperBlock(parent, name),
 		_trim(this, "TRIM"),
 		_limit(this, ""),
-		_val(0) {
+		_val(0)
+	{
 		update(0);
 	};
 	virtual ~BlockOutput() {};
-	void update(float input) {
+	void update(float input)
+	{
 		_val = _limit.update(input + getTrim());
 	}
 // accessors
@@ -439,13 +480,15 @@ public:
 			 const char *name) :
 		Block(parent, name),
 		_min(this, "MIN"),
-		_max(this, "MAX") {
+		_max(this, "MAX")
+	{
 		// seed should be initialized somewhere
 		// in main program for all calls to rand
 		// XXX currently in nuttx if you seed to 0, rand breaks
 	};
 	virtual ~BlockRandUniform() {};
-	float update() {
+	float update()
+	{
 		static float rand_max = MAX_RAND;
 		float rand_val = rand();
 		float bounds = getMax() - getMin();
@@ -470,13 +513,15 @@ public:
 		       const char *name) :
 		Block(parent, name),
 		_mean(this, "MEAN"),
-		_stdDev(this, "DEV") {
+		_stdDev(this, "DEV")
+	{
 		// seed should be initialized somewhere
 		// in main program for all calls to rand
 		// XXX currently in nuttx if you seed to 0, rand breaks
 	};
 	virtual ~BlockRandGauss() {};
-	float update() {
+	float update()
+	{
 		static float V1, V2, S;
 		static int phase = 0;
 		float X;
@@ -492,8 +537,9 @@ public:
 
 			X = V1 * float(sqrt(-2 * float(log(S)) / S));
 
-		} else
+		} else {
 			X = V2 * float(sqrt(-2 * float(log(S)) / S));
+		}
 
 		phase = 1 - phase;
 		return X * getStdDev() + getMean();
@@ -508,5 +554,111 @@ private:
 };
 
 int __EXPORT blockRandGaussTest();
+
+template<class Type, size_t M>
+class __EXPORT BlockStats: public Block
+{
+public:
+// methods
+	BlockStats(SuperBlock *parent,
+		   const char *name) :
+		Block(parent, name),
+		_sum(),
+		_sumSq(),
+		_count(0)
+	{
+	};
+	virtual ~BlockStats() {};
+	void update(const matrix::Vector<Type, M> &u)
+	{
+		_sum += u;
+		_sumSq += u.emult(u);
+		_count += 1;
+	}
+	void reset()
+	{
+		_sum.setZero();
+		_sumSq.setZero();
+		_count = 0;
+	}
+// accessors
+	size_t getCount() { return _count; }
+	matrix::Vector<Type, M> getMean() { return _sum / _count; }
+	matrix::Vector<Type, M> getVar()
+	{
+		return (_sumSq - _sum.emult(_sum) / _count) / _count;
+	}
+	matrix::Vector<Type, M> getStdDev()
+	{
+		return getVar().pow(0.5);
+	}
+private:
+// attributes
+	matrix::Vector<Type, M> _sum;
+	matrix::Vector<Type, M> _sumSq;
+	size_t _count;
+};
+
+int __EXPORT blockStatsTest();
+
+template<class Type, size_t M, size_t N, size_t LEN>
+class __EXPORT BlockDelay: public Block
+{
+public:
+// methods
+	BlockDelay(SuperBlock *parent,
+		   const char *name) :
+		Block(parent, name),
+		_h(),
+		_index(0),
+		_delay(-1)
+	{
+	};
+	virtual ~BlockDelay() {};
+	matrix::Matrix<Type, M, N> update(const matrix::Matrix<Type, M, N> &u)
+	{
+		// store current value
+		_h[_index] = u;
+
+		// delay starts at zero, then increases to LEN
+		_delay += 1;
+
+		if (_delay > (LEN - 1)) {
+			_delay = LEN - 1;
+		}
+
+		// compute position of delayed value
+		int j = _index - _delay;
+
+		if (j < 0) {
+			j += LEN;
+		}
+
+		// increment storage position
+		_index += 1;
+
+		if (_index > (LEN - 1)) {
+			_index  = 0;
+		}
+
+		// get delayed value
+		return _h[j];
+	}
+	matrix::Matrix<Type, M, N> get(size_t delay)
+	{
+		int j = _index - delay;
+
+		if (j < 0) { j += LEN; }
+
+		return _h[j];
+	}
+private:
+// attributes
+	matrix::Matrix<Type, M, N> _h[LEN];
+	size_t _index;
+	int _delay;
+};
+
+int __EXPORT blockDelayTest();
 
 } // namespace control
